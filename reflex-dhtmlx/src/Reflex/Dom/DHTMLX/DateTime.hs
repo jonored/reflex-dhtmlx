@@ -22,6 +22,7 @@ module Reflex.Dom.DHTMLX.DateTime
   , dateTimePickerConfig_attributes
   , dateTimePickerConfig_visibleOnLoad
   , dateTimePickerConfig_timeZone
+  , dateTimePickerConfig_hideRule
   , MinutesInterval (..)
   , minutesIntervalToInt
   ) where
@@ -79,7 +80,7 @@ getDateTimeWidgetValue a
 
 ------------------------------------------------------------------------------
 dateWidgetUpdates
-    :: (TriggerEvent t m, MonadJSM m) => DateTimeWidgetRef -> m (Event t Text)
+    :: (TriggerEvent t m, MonadJSM m) => DateTimeWidgetRef -> m (Event t Text, Event t Text)
 dateWidgetUpdates cal = do
     (event, trigger) <- newTriggerEvent
     let onClickCB = fun $ \_ _ _ -> do
@@ -87,11 +88,12 @@ dateWidgetUpdates cal = do
           liftIO $ trigger txt
     void $ liftJSM $ cal ^. js2 "attachEvent" "onClick" onClickCB
 
+    (timeEvent, timeTrigger) <- newTriggerEvent
     let onTimeChangeCB = fun $ \_ _ _ -> do
           txt <- getDateTimeWidgetValue cal
-          liftIO $ trigger txt
+          liftIO $ timeTrigger txt
     void $ liftJSM $ cal ^. js2 "attachEvent" "onTimeChange" onTimeChangeCB
-    return event
+    return (event, timeEvent)
 
 ------------------------------------------------------------------------------
 data DateTimePickerConfig t = DateTimePickerConfig
@@ -104,12 +106,13 @@ data DateTimePickerConfig t = DateTimePickerConfig
     , _dateTimePickerConfig_attributes      :: Dynamic t (Map Text Text)
     , _dateTimePickerConfig_visibleOnLoad   :: Bool
     , _dateTimePickerConfig_timeZone        :: TimeZone
+    , _dateTimePickerConfig_hideRule        :: forall m. MonadHold t m => Event t () -> Event t () -> m (Event t ())
     }
 
 makeLenses ''DateTimePickerConfig
 
 instance Reflex t => Default (DateTimePickerConfig t) where
-    def = DateTimePickerConfig Nothing never Nothing Nothing Sunday Minutes1 mempty False utc
+    def = DateTimePickerConfig Nothing never Nothing Nothing Sunday Minutes1 mempty False utc (fmap pure . const)
 
 instance HasAttributes (DateTimePickerConfig t) where
   type Attrs (DateTimePickerConfig t) = Dynamic t (Map Text Text)
@@ -128,7 +131,7 @@ dhtmlxDateTimePicker
     :: forall t m. MonadWidget t m
     => DateTimePickerConfig t
     -> m (DateTimePicker t)
-dhtmlxDateTimePicker (DateTimePickerConfig iv sv b p wstart mint attrs visibleOnLoad zone) = mdo
+dhtmlxDateTimePicker (DateTimePickerConfig iv sv b p wstart mint attrs visibleOnLoad zone closeRule) = mdo
     let formatter = T.pack . maybe ""
           (formatTime defaultTimeLocale dateTimeFormat . utcToZonedTime zone)
         ivTxt     = formatter iv
@@ -149,11 +152,12 @@ dhtmlxDateTimePicker (DateTimePickerConfig iv sv b p wstart mint attrs visibleOn
       when (isJust p) $ setPosition cal 0 0
       setMinutesInterval cal mint
       setDateFormat cal $ T.pack calendarsDateTimeFormat
-      ups' <- dateWidgetUpdates $ DateTimeWidgetRef cal
-      performEvent_ $ dateWidgetHide cal <$ ups'
+      (ups', timeups') <- dateWidgetUpdates $ DateTimeWidgetRef cal
+      closeEvent <- closeRule (() <$ ups') $ () <$ timeups'
+      performEvent_ $ dateWidgetHide cal <$ closeEvent
       performEvent_ $ ffor (fmapMaybe (fmap (T.pack . dateTimeFormatter)) sv) $
          setFormattedDate cal $ T.pack dateTimeFormat
-      return ups'
+      return $ leftmost [ups', timeups']
     let parser   = fmap (zonedTimeToUTC . (\dd -> dd {zonedTimeZone = zone}))
                  . parseTimeM True defaultTimeLocale dateTimeFormat . T.unpack
         evParsed = leftmost [parser <$> _textInput_input ti, parser <$> ups, sv]
